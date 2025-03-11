@@ -5,7 +5,6 @@ import itertools
 from collections import namedtuple, defaultdict, Counter
 
 import tqdm
-import opt_einsum
 
 Rule = namedtuple("Rule", ['lhs', 'rhs'])
 
