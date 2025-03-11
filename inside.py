@@ -12,6 +12,12 @@ ROOT = 'ROOT'
 NONE = '-NONE-'
 TERMINAL_MARKER = '_'
 
+def safelog(x):
+    if x == 0:
+        return -float('inf')
+    else:
+        return math.log(x)
+
 class PCFG:
     """ PCFG in Chomsky Normal Form. """
     def __init__(self, nonterminal_rules, terminal_rules, root):
@@ -20,12 +26,12 @@ class PCFG:
         self.root = root
 
         # Build mappings from rhs to rules with probabilities
-        self.nt_rules_inv = {}
-        self.t_rules_inv = {}
+        self.nt_rules_inv = defaultdict(list)
+        self.t_rules_inv = defaultdict(list)
         for rule, p in self.t_rules.items():
-            self.t_rules_inv.setdefault(rule.rhs[0], []).append((rule.lhs, p))
+            self.t_rules_inv[rule.rhs[0]].append((rule.lhs, p))
         for rule, p in self.nt_rules.items():
-            self.nt_rules_inv.setdefault(rule.rhs, []).append((rule.lhs, p))
+            self.nt_rules_inv[rule.rhs].append((rule.lhs, p))
         
     def score(self, xs):
         T = len(xs)
@@ -33,7 +39,7 @@ class PCFG:
         for i, word in enumerate(xs):
             for nt, p in self.t_rules_inv[word]:
                 chart[i][i][nt] = p
-        for span in range(2, T+1):
+        for span in range(2, T + 1):
             for i in range(T - span + 1):
                 j = i + span - 1
                 cell = Counter()
@@ -42,10 +48,10 @@ class PCFG:
                     right_cell = chart[k+1][j]
                     for B, bscore in left_cell.items():
                         for C, cscore in right_cell.items():
-                            for nt, p in self.nt_rules_inv.get((B, C), []):
+                            for nt, p in self.nt_rules_inv[B, C]:
                                 cell[nt] += bscore * cscore * p
                 chart[i][j] = cell
-        return math.log(chart[0][T-1][self.root])
+        return safelog(chart[0][T-1][self.root])
 
 def gensym(_state=itertools.count()):
     return 'X' + str(next(_state))
