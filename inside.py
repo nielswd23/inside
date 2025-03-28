@@ -3,6 +3,10 @@ import math
 import random
 import itertools
 from collections import namedtuple, defaultdict, Counter
+import json
+import csv
+from nltk import ParentedTree
+from nltk import Tree
 
 import tqdm
 
@@ -11,6 +15,75 @@ Rule = namedtuple("Rule", ['lhs', 'rhs'])
 ROOT = 'ROOT'
 NONE = '-NONE-'
 TERMINAL_MARKER = '_'
+
+### TESTING ###
+def save_chart_to_json(chart, filename):
+    with open(filename, "w") as f:
+        json.dump(chart, f, indent=4)
+
+def save_chart_to_txt(chart, filename):
+    with open(filename, "w") as f:
+        T = len(chart)
+        for i in range(T):
+            for j in range(i, T):
+                f.write(f"Span ({i}, {j}):\n")
+                for nt, prob in chart[i][j].items():
+                    f.write(f"  {nt}: {prob:.6f}\n")
+                f.write("\n")  # Add space for readability
+
+def extract_tree(backpointers, i, j, nt):
+    """ Recursively reconstruct the best parse tree in parentheses notation """
+    if i == j:  # Base case: Single word (terminal)
+        return f"({nt} {backpointers[i][j][nt]})"
+    
+    if nt not in backpointers[i][j]:  # No parse for this non-terminal
+        return ""
+    
+    B, C, k = backpointers[i][j][nt]
+    left_subtree = extract_tree(backpointers, i, k, B)
+    right_subtree = extract_tree(backpointers, k+1, j, C)
+    
+    return f"({nt} {left_subtree} {right_subtree})"
+
+def deepest_cnf_node(p_tree): 
+    for pos in reversed(p_tree.treepositions()): # want to start with the deepest CNF nodes so that my assumption of the X node being in the second child position holds  
+        subtree = p_tree[pos]
+        if isinstance(subtree, ParentedTree) and subtree.label().startswith("X"):
+            return pos
+        
+    return None
+
+def remove_cnf_nodes(paren_str):
+    tree = ParentedTree.fromstring(paren_str)
+    pos = deepest_cnf_node(tree) # treeposition of top CNF node
+    if pos:
+        t = tree[pos].parent() # parent tree to fix 
+
+        label = t.label() 
+        children = t[:]
+        if not children[1].label().startswith("X"):
+            print(str(t))
+            raise ValueError("Node must be a CNF node") # I'm assuming the X... node is on the right 
+
+        new_tree = Tree(label, [children[0], *tree[pos][:]])
+        new_tree = ParentedTree.convert(new_tree)
+
+        top_pos = tree[pos].parent().treeposition()
+        if top_pos == (): # if we are changing the root tree, we cannot reassign the top treeposition tree, so we pass the new tree
+            output_parens = new_tree.pformat(margin=1000)
+            # print("ROOT tree", output_parens, "\n")
+            return remove_cnf_nodes(output_parens)
+        else:    
+            tree[top_pos] = new_tree
+            output_parens = tree.pformat(margin=1000)
+            # print("NON ROOT", output_parens, "\n")
+            return remove_cnf_nodes(output_parens)
+    else:
+        # print("WE DID IT")
+        return paren_str
+### TESTING ###
+
+
 
 def safelog(x):
     if x == 0:
@@ -33,12 +106,44 @@ class PCFG:
         for rule, p in self.nt_rules.items():
             self.nt_rules_inv[rule.rhs].append((rule.lhs, p))
         
+    # def score(self, xs):
+    #     T = len(xs)
+    #     chart = [[{} for _ in range(T)] for _ in range(T)]
+    #     for i, word in enumerate(xs):
+    #         for nt, p in self.t_rules_inv[word]:
+    #             chart[i][i][nt] = p
+    #     for span in range(2, T + 1):
+    #         for i in range(T - span + 1):
+    #             j = i + span - 1
+    #             cell = Counter()
+    #             for k in range(i, j):
+    #                 left_cell = chart[i][k]
+    #                 right_cell = chart[k+1][j]
+    #                 for B, bscore in left_cell.items():
+    #                     for C, cscore in right_cell.items():
+    #                         for nt, p in self.nt_rules_inv[B, C]:
+    #                             cell[nt] += bscore * cscore * p
+    #             chart[i][j] = cell
+
+    #     # save_chart_to_txt(chart, "chart_output.txt")
+    #     return safelog(chart[0][T-1][self.root])
+    
     def score(self, xs):
         T = len(xs)
         chart = [[{} for _ in range(T)] for _ in range(T)]
+
         for i, word in enumerate(xs):
-            for nt, p in self.t_rules_inv[word]:
-                chart[i][i][nt] = p
+            if word == "_<WUG>":
+                # print(f"Substituting <WUG> at position {i}:")
+                # Sum over all possible terminals
+                for wug_word, entries in self.t_rules_inv.items():
+                    # print(f"  {wug_word} -> {entries}")
+                    for nt, p in entries:
+                        chart[i][i][nt] = chart[i][i].get(nt, 0) + p
+            else:
+                for nt, p in self.t_rules_inv.get(word, []):
+                    chart[i][i][nt] = p
+
         for span in range(2, T + 1):
             for i in range(T - span + 1):
                 j = i + span - 1
@@ -48,10 +153,117 @@ class PCFG:
                     right_cell = chart[k+1][j]
                     for B, bscore in left_cell.items():
                         for C, cscore in right_cell.items():
-                            for nt, p in self.nt_rules_inv[B, C]:
+                            for nt, p in self.nt_rules_inv.get((B, C), []):
                                 cell[nt] += bscore * cscore * p
                 chart[i][j] = cell
-        return safelog(chart[0][T-1][self.root])
+
+        return safelog(chart[0][T-1].get(self.root, 0))
+
+    # def best_parse(self, xs):
+    #     T = len(xs)
+    #     chart = [[{} for _ in range(T)] for _ in range(T)]
+    #     backpointers = [[{} for _ in range(T)] for _ in range(T)]
+        
+    #     # Base case: Fill in words with their lexical probabilities
+    #     for i, word in enumerate(xs):
+    #         for nt, p in self.t_rules_inv[word]:  # Terminal rules
+    #             chart[i][i][nt] = p
+    #             backpointers[i][i][nt] = word  # Store the word as a leaf
+
+    #     # Recursive case: Fill in larger spans
+    #     for span in range(2, T + 1):  # Span size (2 to T)
+    #         for i in range(T - span + 1):  
+    #             j = i + span - 1  # Span endpoint
+    #             cell = {}  # Stores non-terminals for this span
+    #             backpointer = {}  # Stores split information
+                
+    #             for k in range(i, j):  # Split point
+    #                 left_cell = chart[i][k]
+    #                 right_cell = chart[k+1][j]
+                    
+    #                 for B, bscore in left_cell.items():
+    #                     for C, cscore in right_cell.items():
+    #                         for nt, p in self.nt_rules_inv.get((B, C), []):
+    #                             score = bscore * cscore * p
+    #                             if nt not in cell or score > cell[nt]:  # Maximize probability
+    #                                 cell[nt] = score
+    #                                 backpointer[nt] = (B, C, k)  # Store best split
+                
+    #             chart[i][j] = cell
+    #             backpointers[i][j] = backpointer
+
+    #     # Get the best parse tree for the full sentence
+    #     if self.root in chart[0][T-1]:  # Check if the sentence can be parsed
+    #         return extract_tree(backpointers, 0, T-1, self.root)
+    #     else:
+    #         return "No valid parse found"
+
+    def best_parse(self, xs):
+        T = len(xs)
+        chart = [[{} for _ in range(T)] for _ in range(T)]
+        backpointers = [[{} for _ in range(T)] for _ in range(T)]
+
+        for i, word in enumerate(xs):
+            if word == '_<WUG>':
+                # Try all possible terminal substitutions and keep best-scoring one
+                for terminal_word, entries in self.t_rules_inv.items():
+                    for nt, p in entries:
+                        if p > chart[i][i].get(nt, 0):
+                            chart[i][i][nt] = p
+                            backpointers[i][i][nt] = terminal_word
+            else:
+                for nt, p in self.t_rules_inv.get(word, []):
+                    chart[i][i][nt] = p
+                    backpointers[i][i][nt] = word
+
+        # for i, word in enumerate(xs):
+        #     if word == '_<WUG>':
+        #         # For best_parse, pick the *most probable* terminal substitution
+        #         best_nt = None
+        #         best_word = None
+        #         best_score = 0
+
+        #         for terminal_word, entries in self.t_rules_inv.items():
+        #             for nt, p in entries:
+        #                 if p > best_score:
+        #                     best_score = p
+        #                     best_nt = nt
+        #                     best_word = terminal_word
+
+        #         if best_nt:
+        #             chart[i][i][best_nt] = best_score
+        #             backpointers[i][i][best_nt] = best_word
+        #     else:
+        #         for nt, p in self.t_rules_inv.get(word, []):
+        #             chart[i][i][nt] = p
+        #             backpointers[i][i][nt] = word
+
+        for span in range(2, T + 1):
+            for i in range(T - span + 1):
+                j = i + span - 1
+                cell = {}
+                backpointer = {}
+
+                for k in range(i, j):
+                    left_cell = chart[i][k]
+                    right_cell = chart[k+1][j]
+
+                    for B, bscore in left_cell.items():
+                        for C, cscore in right_cell.items():
+                            for nt, p in self.nt_rules_inv.get((B, C), []):
+                                score = bscore * cscore * p
+                                if nt not in cell or score > cell[nt]:
+                                    cell[nt] = score
+                                    backpointer[nt] = (B, C, k)
+
+                chart[i][j] = cell
+                backpointers[i][j] = backpointer
+
+        if self.root in chart[0][T-1]:
+            return extract_tree(backpointers, 0, T-1, self.root)
+        else:
+            return "No valid parse found"
+
 
 def gensym(_state=itertools.count()):
     return 'X' + str(next(_state))
@@ -163,20 +375,71 @@ def read_grammar(grammar_filename):
     nt_rules, t_rules = convert_to_cnf(rules)
     return PCFG(nt_rules, t_rules, ROOT)
 
-def main(grammar_filename, text_filename):
+
+def main(grammar_filename, text_filename, output_csv):
     print("Processing grammar...", file=sys.stderr)
     grammar = read_grammar(grammar_filename)
+    grammar_terminals = [terminal for terminal, lhs in grammar.t_rules_inv.items()]
     print("Built CNF grammar with %d nonterminal rules." % len(grammar.nt_rules), file=sys.stderr)
-    print("Calculating inside probabilities...", file=sys.stderr)    
+    print("Calculating inside probabilities...", file=sys.stderr)
+
+    ## grammar tests ##
+    with open("terminals_test.txt", 'w') as file:
+        for term in grammar_terminals:
+            file.write(f"{term}\n")
+
+    with open("t_rules.txt", 'w') as file:
+        for rule in grammar.t_rules.items():
+            file.write(f"{rule}\n")
+
+    with open("t_rules_inv.txt", 'w') as file:
+        for rule in grammar.t_rules_inv.items():
+            file.write(f"{rule}\n")
+    print("Done grammar tests\n")
+    ## grammar tests ##
+
     with open(text_filename) as infile:
         lines = infile.readlines()
-    for line in tqdm.tqdm(lines):
-        terminals = [
-            "".join([TERMINAL_MARKER, terminal]) if terminal != NONE else terminal
-            for terminal in line.strip().split()
-        ]
-        score = grammar.score(terminals)
-        print(line.strip(), "\t", score, sep="")
+
+    # Open CSV file for writing
+    with open(output_csv, mode="w", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(["Sentence", "WUGgedSentence", "Score", "CleanedParse"])  # CSV headers
+
+        for line in tqdm.tqdm(lines):
+            terminals = [
+                "".join([TERMINAL_MARKER, terminal]) if terminal != NONE else terminal
+                for terminal in line.strip().split()
+            ]
+            terminals_w_wugs = [word if word in grammar_terminals else "_<WUG>" for word in terminals]
+            print(terminals)
+            print(terminals_w_wugs)
+            score = grammar.score(terminals_w_wugs)
+            print(score)
+            best_parse = grammar.best_parse(terminals_w_wugs)
+            print(best_parse)
+            cleaned_parse = remove_cnf_nodes(best_parse)
+            # cleaned_parse = ""
+
+            # Write the result to CSV
+            writer.writerow([line.strip(), " ".join(terminals_w_wugs).replace("_",''), score, cleaned_parse])
+
+    print(f"Results saved to {output_csv}")
+
 
 if __name__ == '__main__':
     main(*sys.argv[1:])
+
+
+# grammar = read_grammar("./sample1.0.FG-output.rank-1.txt")
+
+# with open("./test_items.txt") as infile:
+#     lines = infile.readlines()
+
+# for line in tqdm.tqdm(lines):
+#     terminals = [
+#         "".join([TERMINAL_MARKER, terminal]) if terminal != NONE else terminal
+#         for terminal in line.strip().split()
+#     ]
+#     score = grammar.score(terminals)
+#     best_parse = grammar.best_parse(terminals)
